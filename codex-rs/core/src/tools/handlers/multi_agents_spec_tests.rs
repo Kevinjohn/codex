@@ -184,15 +184,21 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 
 #[test]
 fn spawn_agent_tool_caps_visible_model_summaries() {
+    let mut models = vec![
+        model_preset("first", /*show_in_picker*/ true),
+        model_preset("second", /*show_in_picker*/ true),
+        model_preset("third", /*show_in_picker*/ true),
+        model_preset("fourth", /*show_in_picker*/ true),
+        model_preset("fifth", /*show_in_picker*/ true),
+    ];
+    assert!(
+        !spawn_agent_models_description(&models, MultiAgentVersion::V2)
+            .contains("This list is truncated")
+    );
+    models.push(model_preset("sixth", /*show_in_picker*/ true));
+
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
-        available_models: vec![
-            model_preset("first", /*show_in_picker*/ true),
-            model_preset("second", /*show_in_picker*/ true),
-            model_preset("third", /*show_in_picker*/ true),
-            model_preset("fourth", /*show_in_picker*/ true),
-            model_preset("fifth", /*show_in_picker*/ true),
-            model_preset("sixth", /*show_in_picker*/ true),
-        ],
+        available_models: models,
         agent_type_description: "role help".to_string(),
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
@@ -212,6 +218,9 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         );
     }
     assert!(!description.contains("`sixth-model`"));
+    assert!(description.contains(
+        "This list is truncated to 5 entries. Other catalog models may also be valid; try an explicit override before declaring a model unavailable."
+    ));
 }
 
 #[test]

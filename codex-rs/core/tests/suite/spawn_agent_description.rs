@@ -17,6 +17,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::default_input_modalities;
+use codex_protocol::protocol::MultiAgentVersion;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
@@ -34,8 +35,8 @@ use tokio::time::sleep;
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
 
-fn spawn_agent_description(body: &Value) -> Option<String> {
-    namespace_child_tool(body, MULTI_AGENT_V1_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
+fn spawn_agent_description(body: &Value, namespace: &str) -> Option<String> {
+    namespace_child_tool(body, namespace, SPAWN_AGENT_TOOL_NAME)
         .and_then(|tool| tool.get("description"))
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -189,8 +190,8 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     test.submit_turn("hello").await?;
 
     let body = resp_mock.single_request().body_json();
-    let description =
-        spawn_agent_description(&body).expect("spawn_agent description should be present");
+    let description = spawn_agent_description(&body, MULTI_AGENT_V1_NAMESPACE)
+        .expect("spawn_agent description should be present");
 
     assert!(
         description.contains("- `visible-model`: Fast and capable"),
@@ -246,6 +247,92 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     assert!(
         !description.contains("A mini model can solve many tasks faster than the main model."),
         "spawn_agent description should not encourage choosing a smaller model by default: {description:?}"
+    );
+
+    Ok(())
+}
+
+#[test_case(false, MULTI_AGENT_V1_NAMESPACE; "v1")]
+#[test_case(true, "collaboration"; "v2")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_agent_description_discloses_truncated_model_overrides(
+    multi_agent_v2: bool,
+    namespace: &str,
+) -> Result<()> {
+    let server = start_mock_server().await;
+    let models = (1..=6)
+        .map(|number| {
+            let mut model = test_model_info(
+                &format!("model-{number}"),
+                &format!("Model {number}"),
+                &format!("Model number {number}"),
+                ModelVisibility::List,
+                ReasoningEffort::Medium,
+                vec![ReasoningEffortPreset {
+                    effort: ReasoningEffort::Medium,
+                    description: "Balanced".to_string(),
+                }],
+                Vec::new(),
+            );
+            model.multi_agent_version = Some(if multi_agent_v2 {
+                MultiAgentVersion::V2
+            } else {
+                MultiAgentVersion::V1
+            });
+            model
+        })
+        .collect();
+    mount_models_once(&server, ModelsResponse { models }).await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model("model-1")
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            if multi_agent_v2 {
+                config
+                    .features
+                    .enable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            } else {
+                config
+                    .features
+                    .disable(Feature::MultiAgentV2)
+                    .expect("test config should allow feature update");
+            }
+            config.multi_agent_v2.hide_spawn_agent_metadata = false;
+        })
+        .build(&server)
+        .await?;
+    wait_for_model_available(&test.thread_manager.get_models_manager(), "model-1").await;
+
+    test.submit_turn("hello").await?;
+
+    let body = response.single_request().body_json();
+    let description = spawn_agent_description(&body, namespace)
+        .expect("spawn_agent description should be present");
+    for number in 1..=5 {
+        assert!(
+            description.contains(&format!("- `model-{number}`: Model number {number}")),
+            "expected model {number} in spawn_agent description: {description:?}"
+        );
+    }
+    assert!(
+        !description.contains("- `model-6`: Model number 6"),
+        "sixth model summary should be omitted from spawn_agent description: {description:?}"
+    );
+    assert!(
+        description.contains(
+            "This list is truncated to 5 entries. Other catalog models may also be valid; try an explicit override before declaring a model unavailable."
+        ),
+        "expected truncation guidance in spawn_agent description: {description:?}"
     );
 
     Ok(())
